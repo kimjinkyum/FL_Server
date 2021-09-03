@@ -3,67 +3,73 @@ import numpy as np
 import json
 from options import args_parser
 import requests
-from models import CNNMnist
+from models import *
 import pickle
 import torch
 from io import BytesIO
 from utils import *
+import logging
+
+logger = logging.getLogger('Communication')
+
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(message)s')
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
 
 
 class FL_server:
-    def __init__(self, url):
+    def __init__(self):
+        self.url = ""
         self.args = args_parser()
-        self.urls = url
+        self.urls = ""
+        self.id = ""
         self.param = {}
-        self.global_model = CNNMnist(args=self.args)
+        self.global_model = select_model(self.args)
         self.flag = True
         self.weight = ""
+        self.train_loss = ""
 
-    def initialize(self):
-        # TODO : Federated Learning info 초기화 & Sending
+    def initialize(self, id, url):
+        self.id = id
+        self.args["id"] = id
+        self.urls = "http://" + url + ':8585/'
+
         send_url = self.urls + "init"
+        logger.info('Send to client id {}'.format(self.id))
         res = requests.post(send_url, data=json.dumps(self.args))
         return res.text
 
-    def start(self, id, init):
-        if init == "initial":
-            if "Success" in self.initialize():
-                print("In")
-                self.send_weight(init)
-                return self.weight
-        else:
-            self.send_weight(init)
-            return self.weight
+    def start(self, server_global_model):
+        logger.info("Start Training client id {}".format(self.id))
+        self.global_model = server_global_model
+        self.send_weight()
+        self.receive_weight()
+        return self.weight
 
-    def send_weight(self, init):
-        if init == "initial":
-            self.global_model.to('cuda')
-            self.weight = self.global_model.state_dict()
+    def send_weight(self):
+        self.global_model.to('cuda')
+        self.weight = self.global_model.state_dict()
 
-        else:
-            # TODO aggregate 받아오기
-            pass
         files = write_weight(self.weight)
+        logger.info("Send weight to client id {}".format(self.id))
+
         send_url = self.urls + "download"
         res = requests.post(send_url, files=files)
+        self.train_loss = res.text
+        print(self.train_loss)
+        return None
 
-        with open('client.pkl', 'wb') as f:
+    def receive_weight(self):
+        send_url = self.urls + "update"
+        res = requests.post(send_url)
+        file_names = 'client_model' + str(self.id) + ".pkl"
+        with open(file_names, 'wb') as f:
             for chunk in res.iter_content(chunk_size=128):
                 f.write(chunk)
-
-        # self.weight = torch.load('client.pkl')
-        self.weight = self.global_model.state_dict()
-        return None
-        # print(self.weight)
-        # return self.weight
-
-    def update(self):
-        # TODO : Waiting Clients weight
-        pass
-
-    def aggregate(self):
-        # TODO : Aggregate & download global model
-        pass
+        print("----------------------", file_names)
 
 
 def get_optimal(arg, param):
@@ -72,6 +78,15 @@ def get_optimal(arg, param):
     arg['local_ep'] = 10 * param['local_ep']
 
     return arg
+
+
+def select_model(args):
+    if args['dataset'] == 'mnist':
+        global_model = CNNMnist(args=args)
+    elif args['dataset'] == 'cifar':
+        global_model = CNNCifar(args=args)
+
+    return global_model.to('cuda')
 
 
 def write_weight(global_weights):
